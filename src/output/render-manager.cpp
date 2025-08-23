@@ -36,7 +36,6 @@ struct swapchain_damage_manager_t
     wf::option_wrapper_t<bool> force_frame_sync{"workarounds/force_frame_sync"};
     wf::wl_listener_wrapper on_needs_frame;
     wf::wl_listener_wrapper on_damage;
-    wf::wl_listener_wrapper on_request_state;
     wf::wl_listener_wrapper on_gamma_changed;
 
     wf::region_t frame_damage;
@@ -86,14 +85,6 @@ struct swapchain_damage_manager_t
             damage_buffer(rotated, true);
         });
 
-        on_request_state.set_callback([=] (void *data)
-        {
-            auto ev = static_cast<wlr_output_event_request_state*>(data);
-            wlr_output_commit_state(output->handle, ev->state);
-            damage_whole();
-            schedule_repaint();
-        });
-
         on_gamma_changed.set_callback([=] (void *data)
         {
             auto event = (const wlr_gamma_control_manager_v1_set_gamma_event*)data;
@@ -106,7 +97,6 @@ struct swapchain_damage_manager_t
 
         on_needs_frame.connect(&output->handle->events.needs_frame);
         on_damage.connect(&output->handle->events.damage);
-        on_request_state.connect(&output->handle->events.request_state);
         on_gamma_changed.connect(&wf::get_core().protocols.gamma_v1->events.set_gamma);
     }
 
