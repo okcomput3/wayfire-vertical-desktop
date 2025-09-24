@@ -164,4 +164,7 @@ extern "C"
 
 // Activation plugin
 #include <wlr/types/wlr_xdg_activation_v1.h>
+
+// Ext protocols
+#include <wlr/types/wlr_ext_data_control_v1.h>
 }
