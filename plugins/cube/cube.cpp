@@ -30,6 +30,9 @@
 #define ZOOM_MAX 10.0f
 #define ZOOM_MIN 0.1f
 
+
+#define CUBE_VERTICAL_SPACING -1.2f
+
 #ifdef USE_GLES32
     #include <GLES3/gl32.h>
 #endif
@@ -50,6 +53,11 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
             std::vector<wf::region_t> ws_damage;
             std::vector<wf::auxilliary_buffer_t> framebuffers;
 
+            // Multiple cube workspaces for all rows
+            std::vector<std::vector<std::vector<wf::scene::render_instance_uptr>>> ws_instances_rows;
+            std::vector<std::vector<wf::region_t>> ws_damage_rows;
+            std::vector<std::vector<wf::auxilliary_buffer_t>> framebuffers_rows;
+
             wf::signal::connection_t<wf::scene::node_damage_signal> on_cube_damage =
                 [=] (wf::scene::node_damage_signal *ev)
             {
@@ -66,6 +74,14 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
                 ws_damage.resize(self->workspaces.size());
                 framebuffers.resize(self->workspaces.size());
                 ws_instances.resize(self->workspaces.size());
+                
+                // Initialize storage for all rows
+                int num_rows = self->workspaces_all_rows.size();
+                ws_damage_rows.resize(num_rows);
+                framebuffers_rows.resize(num_rows);
+                ws_instances_rows.resize(num_rows);
+                
+                // Initialize top cube workspaces (current row)
                 for (int i = 0; i < (int)self->workspaces.size(); i++)
                 {
                     auto push_damage_child = [=] (const wf::region_t& damage)
@@ -78,6 +94,28 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
                         push_damage_child, self->cube->output);
 
                     ws_damage[i] |= self->workspaces[i]->get_bounding_box();
+                }
+                
+                // Initialize all other row workspaces
+                for (int row = 0; row < num_rows; row++)
+                {
+                    ws_damage_rows[row].resize(self->workspaces_all_rows[row].size());
+                    framebuffers_rows[row].resize(self->workspaces_all_rows[row].size());
+                    ws_instances_rows[row].resize(self->workspaces_all_rows[row].size());
+                    
+                    for (int i = 0; i < (int)self->workspaces_all_rows[row].size(); i++)
+                    {
+                        auto push_damage_child = [=] (const wf::region_t& damage)
+                        {
+                            ws_damage_rows[row][i] |= damage;
+                            push_damage(self->get_bounding_box());
+                        };
+
+                        self->workspaces_all_rows[row][i]->gen_render_instances(ws_instances_rows[row][i],
+                            push_damage_child, self->cube->output);
+
+                        ws_damage_rows[row][i] |= self->workspaces_all_rows[row][i]->get_bounding_box();
+                    }
                 }
             }
 
@@ -98,6 +136,7 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
 
                 damage ^= bbox;
 
+                // Render top cube workspaces (current row)
                 for (int i = 0; i < (int)ws_instances.size(); i++)
                 {
                     const float scale = self->cube->output->handle->scale;
@@ -118,11 +157,36 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
                     wf::render_pass_t::run(params);
                     ws_damage[i].clear();
                 }
+                
+                // Render all other row workspaces
+                for (int row = 0; row < (int)ws_instances_rows.size(); row++)
+                {
+                    for (int i = 0; i < (int)ws_instances_rows[row].size(); i++)
+                    {
+                        const float scale = self->cube->output->handle->scale;
+                        auto bbox = self->workspaces_all_rows[row][i]->get_bounding_box();
+                        framebuffers_rows[row][i].allocate(wf::dimensions(bbox), scale);
+
+                        wf::render_target_t target{framebuffers_rows[row][i]};
+                        target.geometry = self->workspaces_all_rows[row][i]->get_bounding_box();
+                        target.scale    = self->cube->output->handle->scale;
+
+                        wf::render_pass_params_t params;
+                        params.instances = &ws_instances_rows[row][i];
+                        params.damage    = ws_damage_rows[row][i];
+                        params.reference_output = self->cube->output;
+                        params.target = target;
+                        params.flags  = wf::RPASS_CLEAR_BACKGROUND | wf::RPASS_EMIT_SIGNALS;
+
+                        wf::render_pass_t::run(params);
+                        ws_damage_rows[row][i].clear();
+                    }
+                }
             }
 
             void render(const wf::scene::render_instruction_t& data) override
             {
-                self->cube->render(data, framebuffers);
+                self->cube->render(data, framebuffers, framebuffers_rows);
             }
 
             void compute_visibility(wf::output_t *output, wf::region_t& visible) override
@@ -135,6 +199,18 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
                         ch->compute_visibility(output, ws_region);
                     }
                 }
+                
+                for (int row = 0; row < (int)self->workspaces_all_rows.size(); row++)
+                {
+                    for (int i = 0; i < (int)self->workspaces_all_rows[row].size(); i++)
+                    {
+                        wf::region_t ws_region = self->workspaces_all_rows[row][i]->get_bounding_box();
+                        for (auto& ch : this->ws_instances_rows[row][i])
+                        {
+                            ch->compute_visibility(output, ws_region);
+                        }
+                    }
+                }
             }
         };
 
@@ -143,11 +219,29 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
         {
             this->cube = cube;
             auto w = cube->output->wset()->get_workspace_grid_size().width;
+            auto h = cube->output->wset()->get_workspace_grid_size().height;
             auto y = cube->output->wset()->get_current_workspace().y;
+            
+            // Top cube - current row
             for (int i = 0; i < w; i++)
             {
                 auto node = std::make_shared<wf::workspace_stream_node_t>(cube->output, wf::point_t{i, y});
                 workspaces.push_back(node);
+            }
+            
+            // All other rows
+            for (int row_offset = 1; row_offset < h; row_offset++)
+            {
+                int target_y = (y + row_offset) % h;
+                std::vector<std::shared_ptr<wf::workspace_stream_node_t>> row_workspaces;
+                
+                for (int i = 0; i < w; i++)
+                {
+                    auto node = std::make_shared<wf::workspace_stream_node_t>(cube->output, wf::point_t{i, target_y});
+                    row_workspaces.push_back(node);
+                }
+                
+                workspaces_all_rows.push_back(row_workspaces);
             }
         }
 
@@ -171,6 +265,7 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
 
       private:
         std::vector<std::shared_ptr<wf::workspace_stream_node_t>> workspaces;
+        std::vector<std::vector<std::shared_ptr<wf::workspace_stream_node_t>>> workspaces_all_rows;
         wayfire_cube *cube;
     };
 
@@ -184,6 +279,9 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
     /* the Z camera distance so that (-1, 1) is mapped to the whole screen
      * for the given FOV */
     float identity_z_offset;
+
+    // Camera vertical position for viewing different cube rows
+    wf::animation::simple_animation_t camera_y_offset{wf::create_option<int>(300)};
 
     OpenGL::program_t program;
 
@@ -248,6 +346,8 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
         animation.cube_animation.ease_deformation.set(0, 0);
 
         animation.cube_animation.start();
+        
+        camera_y_offset.set(0, 0);
 
         reload_background();
 
@@ -390,6 +490,10 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
         reload_background();
         animation.cube_animation.offset_z.set(identity_z_offset + Z_OFFSET_NEAR,
             identity_z_offset + Z_OFFSET_NEAR);
+        
+        // Force a full redraw to clear any stale state
+        output->render->damage_whole();
+        
         return true;
     }
 
@@ -400,53 +504,129 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
         return std::floor(dx + 0.5);
     }
 
-    /* Disable custom rendering and deactivate plugin */
-    void deactivate()
+// Add this method to calculate which row we're currently viewing
+int calculate_viewport_dy_from_camera()
+{
+    // Calculate which cube row the camera is focused on
+    // Each row is offset by CUBE_VERTICAL_SPACING
+    float dy = -camera_y_offset / (-CUBE_VERTICAL_SPACING);
+    return std::floor(dy + 0.5);
+}
+
+// Modified deactivate() method
+void deactivate()
+{
+    if (!output->is_plugin_active(grab_interface.name))
     {
-        if (!output->is_plugin_active(grab_interface.name))
-        {
-            return;
-        }
-
-        wf::scene::remove_child(render_node);
-        output->render->damage_whole();
-
-        render_node = nullptr;
-        output->render->rem_effect(&pre_hook);
-        output->render->set_require_depth_buffer(false);
-
-        input_grab->ungrab_input();
-        output->deactivate_plugin(&grab_interface);
-        wf::get_core().unhide_cursor();
-        on_motion_event.disconnect();
-
-        /* Figure out how much we have rotated and switch workspace */
-        int size = get_num_faces();
-        int dvx  = calculate_viewport_dx_from_rotation();
-
-        auto cws = output->wset()->get_current_workspace();
-        int nvx  = (cws.x + (dvx % size) + size) % size;
-        output->wset()->set_workspace({nvx, cws.y});
-
-        /* We are finished with rotation, make sure the next time cube is used
-         * it is properly reset */
-        animation.cube_animation.rotation.set(0, 0);
+        return;
     }
 
-    /* Sets attributes target to such values that the cube effect isn't visible,
-     * i.e towards the starting(or ending) position
-     *
-     * It doesn't change rotation because that is different in different cases -
-     * for example when moved by the keyboard or with a button grab */
-    void reset_attribs()
+    wf::scene::remove_child(render_node);
+    output->render->damage_whole();
+
+    render_node = nullptr;
+    output->render->rem_effect(&pre_hook);
+    output->render->set_require_depth_buffer(false);
+
+    input_grab->ungrab_input();
+    output->deactivate_plugin(&grab_interface);
+    wf::get_core().unhide_cursor();
+    on_motion_event.disconnect();
+
+    /* Figure out how much we have rotated and switch workspace */
+    int size = get_num_faces();
+    int dvx  = calculate_viewport_dx_from_rotation();
+    
+    // NEW: Calculate vertical workspace change based on camera position
+    int dvy = calculate_viewport_dy_from_camera();
+
+    auto cws = output->wset()->get_current_workspace();
+    auto grid = output->wset()->get_workspace_grid_size();
+    
+    int nvx = (cws.x + (dvx % size) + size) % size;
+    int nvy = (cws.y + dvy) % grid.height;
+    
+    // Clamp to valid workspace range
+    nvy = std::max(0, std::min(nvy, grid.height - 1));
+    
+    output->wset()->set_workspace({nvx, nvy});
+
+    /* We are finished with rotation, make sure the next time cube is used
+     * it is properly reset */
+    animation.cube_animation.rotation.set(0, 0);
+    camera_y_offset.set(0, 0);  // Reset camera position
+}
+
+// Modified move_vp_vertical to track row changes more accurately
+bool move_vp_vertical(int dir)
+{
+    bool was_active = output->is_plugin_active(grab_interface.name);
+    
+    if (!was_active && !activate())
     {
-        animation.cube_animation.zoom.restart_with_end(1.0);
-        animation.cube_animation.offset_z.restart_with_end(
-            identity_z_offset + Z_OFFSET_NEAR);
-        animation.cube_animation.offset_y.restart_with_end(0);
-        animation.cube_animation.ease_deformation.restart_with_end(0);
+        return false;
     }
 
+    // Calculate target camera position, scaled by current zoom
+    float current_offset = camera_y_offset;
+    float zoom_factor = animation.cube_animation.zoom;
+    float effective_spacing = CUBE_VERTICAL_SPACING / zoom_factor;
+    float target_offset = current_offset + (dir * effective_spacing);
+    
+    // Get grid height to limit movement
+    auto grid = output->wset()->get_workspace_grid_size();
+    int max_rows = grid.height - 1;
+    
+    // Clamp the camera position to valid cube range
+    float min_offset = -max_rows * -CUBE_VERTICAL_SPACING;
+    float max_offset = 0.0f;
+    target_offset = std::max(min_offset, std::min(max_offset, target_offset));
+    
+    // If we're already at the target, do nothing
+    if (std::abs(target_offset - current_offset) < 0.01f)
+    {
+        return false;
+    }
+
+    // Don't exit on movement - stay in cube mode
+    animation.in_exit = false;
+
+    // Animate camera to new position
+    camera_y_offset.animate(target_offset);
+
+    // Keep other animations stable but update offset_z for new focal point
+    animation.cube_animation.zoom.restart_with_end(
+        animation.cube_animation.zoom.end);
+    animation.cube_animation.rotation.restart_with_end(
+        animation.cube_animation.rotation.end);
+    animation.cube_animation.ease_deformation.restart_with_end(
+        animation.cube_animation.ease_deformation.end);
+    animation.cube_animation.offset_y.restart_with_end(
+        animation.cube_animation.offset_y.end);
+    
+    // Recalculate offset_z for new camera position
+    float base_offset = identity_z_offset + Z_OFFSET_NEAR;
+    float y_distance =2;
+    float z_adjust = std::sqrt(base_offset * base_offset + y_distance * y_distance) - base_offset;
+    animation.cube_animation.offset_z.restart_with_end(base_offset + z_adjust);
+
+    animation.cube_animation.start();
+    update_view_matrix();
+    output->render->schedule_redraw();
+
+    return true;
+}
+
+// Modified reset_attribs to maintain camera position during transitions
+void reset_attribs()
+{
+    animation.cube_animation.zoom.restart_with_end(1.0);
+    animation.cube_animation.offset_z.restart_with_end(
+        identity_z_offset + Z_OFFSET_NEAR);
+    animation.cube_animation.offset_y.restart_with_end(0);
+    animation.cube_animation.ease_deformation.restart_with_end(0);
+    // Don't reset camera_y_offset here - let it maintain position until deactivate
+}
     /* Start moving to a workspace to the left/right using the keyboard */
     bool move_vp(int dir)
     {
@@ -471,6 +651,8 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
 
         return true;
     }
+
+
 
     /* Initiate with an button grab. */
     bool input_grabbed()
@@ -537,11 +719,15 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
             (float)animation.cube_animation.offset_y,
             glm::vec3(1., 0., 0.));
 
+        // Apply camera vertical offset for viewing different cube rows
+        auto camera_vertical = glm::translate(glm::mat4(1.0),
+            glm::vec3(0.f, camera_y_offset, 0.f));
+
         auto view = glm::lookAt(glm::vec3(0., 0., 0.),
             glm::vec3(0., 0., -animation.cube_animation.offset_z),
             glm::vec3(0., 1., 0.));
 
-        animation.view = zoom_translate * rotation * view;
+        animation.view = zoom_translate * rotation * camera_vertical * view;
     }
 
     glm::mat4 output_transform(const wf::render_target_t& target)
@@ -550,17 +736,25 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
         return wf::gles::render_target_gl_to_framebuffer(target) * scale;
     }
 
-    glm::mat4 calculate_vp_matrix(const wf::render_target_t& dest)
-    {
-        float zoom_factor = animation.cube_animation.zoom;
-        auto scale_matrix = glm::scale(glm::mat4(1.0),
-            glm::vec3(1. / zoom_factor, 1. / zoom_factor, 1. / zoom_factor));
+glm::mat4 calculate_vp_matrix(const wf::render_target_t& dest)
+{
+    float zoom_factor = animation.cube_animation.zoom;
+    
+    // NEW: Build scale with row-centered translation wrapper
+    auto scale_matrix = glm::scale(glm::mat4(1.0),
+        glm::vec3(1. / zoom_factor, 1. / zoom_factor, 1. / zoom_factor));
 
-        return output_transform(dest) * animation.projection * animation.view * scale_matrix;
-    }
+    // NEW: Translate scene so current row is at Y=0 for zoom, scale, then translate back
+    auto to_row_center = glm::translate(glm::mat4(1.0), glm::vec3(0.0f, camera_y_offset, 0.0f));
+    auto from_row_center = glm::translate(glm::mat4(1.0), glm::vec3(0.0f, -camera_y_offset, 0.0f));
+    auto centered_scale = from_row_center * scale_matrix * to_row_center;
+
+    // Compose: projection * view * centered_scale (applies row-focused zoom)
+    return output_transform(dest) * animation.projection * animation.view * centered_scale;
+}
 
     /* Calculate the base model matrix for the i-th side of the cube */
-    glm::mat4 calculate_model_matrix(int i)
+    glm::mat4 calculate_model_matrix(int i, float vertical_offset = 0.0f)
     {
         const float angle =
             i * animation.side_angle + animation.cube_animation.rotation;
@@ -577,16 +771,26 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
         }
 
         auto translation = glm::translate(glm::mat4(1.0),
-            glm::vec3(0, 0, identity_z_offset + additional_z));
+            glm::vec3(0, vertical_offset, identity_z_offset + additional_z));
 
         return rotation * translation;
     }
 
     /* Render the sides of the cube, using the given culling mode - cw or ccw */
-    void render_cube(GLuint front_face, std::vector<wf::auxilliary_buffer_t>& buffers)
+    void render_cube(GLuint front_face, std::vector<wf::auxilliary_buffer_t>& buffers, float vertical_offset = 0.0f)
     {
         GL_CALL(glFrontFace(front_face));
         static const GLuint indexData[] = {0, 1, 2, 0, 2, 3};
+
+        // NEW: Set the cube's vertical offset in the shader
+        if (tessellation_support)
+        {
+            GLint loc = glGetUniformLocation(program.get_program_id(wf::TEXTURE_TYPE_RGBA), "cubeVerticalOffset");
+            if (loc >= 0)
+            {
+                GL_CALL(glUniform1f(loc, vertical_offset));
+            }
+        }
 
         auto cws = output->wset()->get_current_workspace();
         for (int i = 0; i < get_num_faces(); i++)
@@ -594,14 +798,14 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
             int index = (cws.x + i) % get_num_faces();
             GL_CALL(glBindTexture(GL_TEXTURE_2D, wf::gles_texture_t::from_aux(buffers[index]).tex_id));
 
-            auto model = calculate_model_matrix(i);
+            auto model = calculate_model_matrix(i, vertical_offset);
             program.uniformMatrix4f("model", model);
 
             if (tessellation_support)
             {
-#ifdef USE_GLES32
+    #ifdef USE_GLES32
                 GL_CALL(glDrawElements(GL_PATCHES, 6, GL_UNSIGNED_INT, &indexData));
-#endif
+    #endif
             } else
             {
                 GL_CALL(glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT,
@@ -610,7 +814,8 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
         }
     }
 
-    void render(const wf::scene::render_instruction_t& data, std::vector<wf::auxilliary_buffer_t>& buffers)
+    void render(const wf::scene::render_instruction_t& data, std::vector<wf::auxilliary_buffer_t>& buffers, 
+                std::vector<std::vector<wf::auxilliary_buffer_t>>& buffers_rows)
     {
         data.pass->custom_gles_subpass([&]
         {
@@ -619,7 +824,10 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
                 load_program();
             }
 
-            GL_CALL(glClear(GL_DEPTH_BUFFER_BIT));
+            // Clear both color and depth buffers at the start
+            GL_CALL(glClearColor(0.0f, 0.0f, 0.0f, 0.0f));
+            GL_CALL(glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT));
+            
             background->render_frame(data.target, animation);
 
             auto vp = calculate_vp_matrix(data.target);
@@ -627,6 +835,9 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
             program.use(wf::TEXTURE_TYPE_RGBA);
             GL_CALL(glEnable(GL_DEPTH_TEST));
             GL_CALL(glDepthFunc(GL_LESS));
+            
+            // Ensure depth writes are enabled
+            GL_CALL(glDepthMask(GL_TRUE));
 
             static GLfloat vertexData[] = {
                 -0.5, 0.5,
@@ -651,15 +862,36 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
                 program.uniform1i("light", use_light);
                 program.uniform1f("ease",
                     animation.cube_animation.ease_deformation);
+        
+            // NEW: Pass camera Y offset to shader
+            GLint loc = glGetUniformLocation(program.get_program_id(wf::TEXTURE_TYPE_RGBA), "cameraYOffset");
+            if (loc >= 0)
+            {
+                GL_CALL(glUniform1f(loc, camera_y_offset));
+            }
             }
 
-            /* We render the cube in two stages, based on winding.
-             * By using two stages, we ensure that we first render the cube sides
-             * that are on the back, and then we render those at the front, so we
-             * don't have to use depth testing and we also can support alpha cube. */
             GL_CALL(glEnable(GL_CULL_FACE));
+            
+            // Render all cubes from bottom to top, back faces first, then front faces
+            // This ensures proper depth ordering
+            
+            // Render back faces (CCW) of all cubes from bottom to top
+            for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
+            {
+                float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
+                render_cube(GL_CCW, buffers_rows[row], vertical_offset);
+            }
             render_cube(GL_CCW, buffers);
+            
+            // Render front faces (CW) of all cubes from bottom to top
+            for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
+            {
+                float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
+                render_cube(GL_CW, buffers_rows[row], vertical_offset);
+            }
             render_cube(GL_CW, buffers);
+            
             GL_CALL(glDisable(GL_CULL_FACE));
 
             GL_CALL(glDisable(GL_DEPTH_TEST));
@@ -671,7 +903,7 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
     {
         update_view_matrix();
         wf::scene::damage_node(render_node, render_node->get_bounding_box());
-        if (animation.cube_animation.running())
+        if (animation.cube_animation.running() || camera_y_offset.running())
         {
             output->render->schedule_redraw();
         } else if (animation.in_exit)
@@ -723,33 +955,41 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
         output->render->schedule_redraw();
     }
 
-    void pointer_scrolled(double amount)
+
+// Fixed pointer_scrolled with proper zoom focal point adjustment
+void pointer_scrolled(double amount)
+{
+    if (animation.in_exit)
     {
-        if (animation.in_exit)
-        {
-            return;
-        }
-
-        animation.cube_animation.offset_y.restart_with_end(
-            animation.cube_animation.offset_y.end);
-        animation.cube_animation.offset_z.restart_with_end(
-            animation.cube_animation.offset_z.end);
-        animation.cube_animation.rotation.restart_with_end(
-            animation.cube_animation.rotation.end);
-        animation.cube_animation.ease_deformation.restart_with_end(
-            animation.cube_animation.ease_deformation.end);
-
-        float target_zoom = animation.cube_animation.zoom;
-        float start_zoom  = target_zoom;
-
-        target_zoom +=
-            std::min(std::pow(target_zoom, 1.5f), ZOOM_MAX) * amount * ZVelocity;
-        target_zoom = std::min(std::max(target_zoom, ZOOM_MIN), ZOOM_MAX);
-        animation.cube_animation.zoom.set(start_zoom, target_zoom);
-
-        animation.cube_animation.start();
-        output->render->schedule_redraw();
+        return;
     }
+
+    animation.cube_animation.offset_y.restart_with_end(
+        animation.cube_animation.offset_y.end);
+    animation.cube_animation.rotation.restart_with_end(
+        animation.cube_animation.rotation.end);
+    animation.cube_animation.ease_deformation.restart_with_end(
+        animation.cube_animation.ease_deformation.end);
+
+    float target_zoom = animation.cube_animation.zoom;
+    float start_zoom  = target_zoom;
+
+    target_zoom +=
+        std::min(std::pow(target_zoom, 1.5f), ZOOM_MAX) * amount * ZVelocity;
+    target_zoom = std::min(std::max(target_zoom, ZOOM_MIN), ZOOM_MAX);
+    animation.cube_animation.zoom.set(start_zoom, target_zoom);
+
+    // Adjust offset_z based on camera_y_offset to change zoom focal point
+    float base_offset = identity_z_offset + Z_OFFSET_NEAR;
+    float y_distance = std::abs(camera_y_offset);
+    float z_adjust = std::sqrt(base_offset * base_offset + y_distance * y_distance) - base_offset;
+    
+    animation.cube_animation.offset_z.restart_with_end(base_offset + z_adjust);
+
+    animation.cube_animation.start();
+    output->render->schedule_redraw();
+}
+
 
     void fini() override
     {
@@ -771,6 +1011,8 @@ class wayfire_cube_global : public wf::plugin_interface_t,
 {
     wf::ipc_activator_t rotate_left{"cube/rotate_left"};
     wf::ipc_activator_t rotate_right{"cube/rotate_right"};
+    wf::ipc_activator_t rotate_up{"cube/rotate_up"};
+    wf::ipc_activator_t rotate_down{"cube/rotate_down"};
     wf::ipc_activator_t activate{"cube/activate"};
 
   public:
@@ -787,6 +1029,8 @@ class wayfire_cube_global : public wf::plugin_interface_t,
         this->init_output_tracking();
         rotate_left.set_handler(rotate_left_cb);
         rotate_right.set_handler(rotate_right_cb);
+        rotate_up.set_handler(rotate_up_cb);
+        rotate_down.set_handler(rotate_down_cb);
         activate.set_handler(activate_cb);
     }
 
@@ -805,10 +1049,20 @@ class wayfire_cube_global : public wf::plugin_interface_t,
         return this->output_instance[output]->move_vp(+1);
     };
 
+    wf::ipc_activator_t::handler_t rotate_up_cb = [=] (wf::output_t *output, wayfire_view)
+    {
+        return this->output_instance[output]->move_vp_vertical(-1);
+    };
+
+    wf::ipc_activator_t::handler_t rotate_down_cb = [=] (wf::output_t *output, wayfire_view)
+    {
+        return this->output_instance[output]->move_vp_vertical(+1);
+    };
+
     wf::ipc_activator_t::handler_t activate_cb = [=] (wf::output_t *output, wayfire_view)
     {
         return this->output_instance[output]->input_grabbed();
     };
 };
 
-DECLARE_WAYFIRE_PLUGIN(wayfire_cube_global);
+DECLARE_WAYFIRE_PLUGIN(wayfire_cube_global)

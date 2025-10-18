@@ -23,6 +23,16 @@
 				<_long>Rotates right with the specified activator.</_long>
 				<default>none</default>
 			</option>
+			<option name="rotate_up" type="activator">
+				<_short>Rotate up</_short>
+				<_long>Moves to the workspace row above with the specified activator.</_long>
+				<default>none</default>
+			</option>
+			<option name="rotate_down" type="activator">
+				<_short>Rotate down</_short>
+				<_long>Moves to the workspace row below with the specified activator.</_long>
+				<default>none</default>
+			</option>
 		</group>
 		<!-- Effects -->
 		<option name="deform" type="int">
