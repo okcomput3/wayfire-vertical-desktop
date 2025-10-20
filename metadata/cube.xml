@@ -59,6 +59,32 @@
 			<_long>Specifies whether to use lighting.</_long>
 			<default>true</default>
 		</option>
+		<!-- Window Popout -->
+		<group>
+			<_short>Window Popout Effect</_short>
+			<_long>Creates a larger cube showing only windows without background.</_long>
+			<option name="enable_window_popout" type="bool">
+				<_short>Enable window popout</_short>
+				<_long>Enables rendering of a larger cube showing only windows floating above the main cube.</_long>
+				<default>false</default>
+			</option>
+			<option name="popout_scale" type="double">
+				<_short>Popout scale</_short>
+				<_long>Sets how much larger the window popout cube should be compared to the main cube. 1.0 = same size, 1.2 = 20% larger.</_long>
+				<default>1.15</default>
+				<min>1.0</min>
+				<max>2.0</max>
+				<precision>0.01</precision>
+			</option>
+			<option name="popout_opacity" type="double">
+				<_short>Popout opacity</_short>
+				<_long>Sets the opacity of the window popout cube. 1.0 = fully opaque, 0.5 = semi-transparent.</_long>
+				<default>1.0</default>
+				<min>0.0</min>
+				<max>1.0</max>
+				<precision>0.01</precision>
+			</option>
+		</group>
 		<!-- Zoom -->
 		<option name="zoom" type="double">
 			<_short>Zoom</_short>

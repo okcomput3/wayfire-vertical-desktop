@@ -144,13 +144,13 @@ void main() {
 
 static const char *cube_fragment_3_2 =
 R"(#version 320 es
-
+precision highp float;
+precision highp sampler2D;
 in highp vec2 guv;
 in highp vec3 colorFactor;
 layout(location = 0) out highp vec4 outColor;
-
-uniform sampler2D smp;
-
+uniform highp sampler2D smp;
 void main() {
-    outColor = vec4(texture(smp, guv).xyz * colorFactor, 1.0);
-})";
+    highp vec4 texColor = texture(smp, guv);
+    outColor = vec4(texColor.rgb * colorFactor, texColor.a);
+})";    
