@@ -23,6 +23,7 @@
 #include "wayfire/scene-render.hpp"
 #include "wayfire/scene.hpp"
 #include "wayfire/signal-definitions.hpp"
+#include <chrono>
 
 #define Z_OFFSET_NEAR 0.89567f
 #define Z_OFFSET_FAR  2.00000f
@@ -39,6 +40,244 @@
 
 #include "shaders.tpp"
 #include "shaders-3-2.tpp"
+
+// Vertex shader - updated to pass world position
+static const char *cube_cap_vertex = R"(
+#version 100
+attribute mediump vec2 position;
+attribute mediump vec2 uvPosition;
+
+uniform mat4 VP;
+uniform mat4 model;
+
+varying mediump vec2 uvpos;
+varying mediump vec3 worldPos;
+
+void main() {
+    uvpos = uvPosition;
+    vec4 worldPosition = model * vec4(position.x, 0.0, position.y, 1.0);
+    worldPos = worldPosition.xyz;
+    gl_Position = VP * worldPosition;
+}
+)";
+
+// Fragment shader - animated with wave effects
+static const char *cube_cap_fragment = R"(
+#version 100
+precision mediump float;
+
+varying mediump vec2 uvpos;
+varying mediump vec3 worldPos;
+uniform sampler2D smp;
+uniform float cap_alpha;
+uniform float time;  // Add this uniform
+
+void main() {
+    // Calculate distance from center using UV coordinates
+    vec2 centerUV = uvpos - vec2(0.5, 0.5);
+    float dist = length(centerUV) * 2.0;  // Normalize to 0-1 range
+    
+    // Wave parameters
+    float frequency = 40.0;
+    float speed = 1.8;
+    float amplitude = 0.1;
+    
+    // Calculate wave height
+    float height = sin(dist * frequency - time * speed) * amplitude;
+    
+    // Calculate gradients for normal mapping
+    float delta = 0.01;
+    
+    // X gradient
+    vec2 uvX1 = uvpos + vec2(delta, 0.0);
+    vec2 uvX2 = uvpos - vec2(delta, 0.0);
+    float distX1 = length((uvX1 - vec2(0.5, 0.5)) * 2.0);
+    float distX2 = length((uvX2 - vec2(0.5, 0.5)) * 2.0);
+    float hX1 = sin(distX1 * frequency - time * speed) * amplitude;
+    float hX2 = sin(distX2 * frequency - time * speed) * amplitude;
+    float dx = (hX1 - hX2) / (2.0 * delta);
+    
+    // Y gradient
+    vec2 uvY1 = uvpos + vec2(0.0, delta);
+    vec2 uvY2 = uvpos - vec2(0.0, delta);
+    float distY1 = length((uvY1 - vec2(0.5, 0.5)) * 2.0);
+    float distY2 = length((uvY2 - vec2(0.5, 0.5)) * 2.0);
+    float hY1 = sin(distY1 * frequency - time * speed) * amplitude;
+    float hY2 = sin(distY2 * frequency - time * speed) * amplitude;
+    float dy = (hY1 - hY2) / (2.0 * delta);
+    
+    // Calculate normal from gradients
+    vec3 normal = normalize(vec3(-dx, -dy, 1.0));
+    
+    // Animated light direction
+    vec3 lightDir = normalize(vec3(0.3, sin(time * 0.2), 0.5));
+    
+    // Calculate lighting
+    float brightness = clamp(exp(dot(normal, lightDir)) * 0.5, 0.0, 1.0);
+    
+    // Get base color from texture
+    vec4 texColor = texture2D(smp, uvpos);
+    
+    // Apply lighting and alpha
+    vec3 finalColor = texColor.rgb * brightness;
+    gl_FragColor = vec4(finalColor, texColor.a * 1.0);
+}
+)";
+
+
+// Background Vertex Shader - Simple fullscreen quad
+static const char *background_vertex_shader = R"(
+#version 100
+attribute vec2 position;
+varying vec2 v_uv;
+
+void main() {
+    gl_Position = vec4(position, 0.0, 1.0);
+    v_uv = position * 0.5 + 0.5;
+}
+)";
+
+// Background Fragment Shader - Volumetric space/nebula
+static const char *background_fragment_shader = R"(
+#version 100
+precision mediump float;
+
+uniform float u_time;
+uniform vec2 u_resolution;
+varying vec2 v_uv;
+
+#define iterations 4
+#define formuparam2 0.89
+#define volsteps 10
+#define stepsize 0.190
+#define zoom 3.900
+#define tile 0.450
+#define speed2 0.010
+#define brightness 0.2
+#define darkmatter 0.400
+#define distfading 0.560
+#define saturation 0.400
+#define transverseSpeed 1.1
+#define cloud 0.2
+
+float field(in vec3 p, float u_time) {
+    float strength = 7.0 + 0.03 * log(1.e-6 + fract(sin(u_time) * 4373.11));
+    float accum = 0.;
+    float prev = 0.;
+    float tw = 0.;
+
+    for (int i = 0; i < 6; ++i) {
+        float mag = dot(p, p);
+        p = abs(p) / mag + vec3(-0.5, -0.8 + 0.1 * sin(u_time * 0.2 + 2.0), -1.1 + 0.3 * cos(u_time * 0.15));
+        float w = exp(-float(i) / 7.0);
+        accum += w * exp(-strength * pow(abs(mag - prev), 2.3));
+        tw += w;
+        prev = mag;
+    }
+    return max(0.0, 5.0 * accum / tw - 0.7);
+}
+
+void main() {
+    vec2 iResolution = u_resolution;
+    float iTime = u_time / 3.0;
+    
+    vec2 fragCoord = v_uv * iResolution;
+    vec2 uv2 = 2.0 * fragCoord.xy / iResolution.xy - 1.0;
+    vec2 uvs = uv2 * iResolution.xy / max(iResolution.x, iResolution.y);
+
+    float time2 = iTime;
+    float speed = 0.005 * cos(time2 * 0.02 + 3.1415926 / 4.0);
+    float formuparam = formuparam2;
+    
+    vec2 uv = uvs;
+    float a_xz = 0.9;
+    float a_yz = -0.6;
+    float a_xy = 0.9 + iTime * 0.04;
+
+    mat2 rot_xz = mat2(cos(a_xz), sin(a_xz), -sin(a_xz), cos(a_xz));
+    mat2 rot_yz = mat2(cos(a_yz), sin(a_yz), -sin(a_yz), cos(a_yz));
+    mat2 rot_xy = mat2(cos(a_xy), sin(a_xy), -sin(a_xy), cos(a_xy));
+
+    vec3 dir = vec3(uv * zoom, 1.0);
+    vec3 from = vec3(0.0, 0.0, 0.0);
+
+    from.x -= 2.5;
+    from.y -= 2.5;
+
+    vec3 forward = vec3(0.0, 0.0, 1.0);
+
+    from.x += transverseSpeed * cos(0.01 * iTime) + 0.001 * iTime;
+    from.y += transverseSpeed * sin(0.01 * iTime) + 0.001 * iTime;
+    from.z += 0.003 * iTime;
+
+    dir.xy *= rot_xy;
+    forward.xy *= rot_xy;
+    dir.xz *= rot_xz;
+    forward.xz *= rot_xz;
+    dir.yz *= rot_yz;
+    forward.yz *= rot_yz;
+
+    from.xy *= -rot_xy;
+    from.xz *= rot_xz;
+    from.yz *= rot_yz;
+
+    float zooom = (time2 - 3311.0) * speed;
+    from += forward * zooom;
+    float sampleShift = mod(zooom, stepsize);
+    float zoffset = -sampleShift;
+    sampleShift /= stepsize;
+
+    float s = 0.24;
+    float s3 = s + stepsize / 2.0;
+    vec3 v = vec3(0.0);
+    float t3 = 0.0;
+
+    vec3 backCol2 = vec3(0.0);
+    for (int r = 0; r < volsteps; r++) {
+        vec3 p2 = from + (s + zoffset) * dir;
+        vec3 p3 = (from + (s3 + zoffset) * dir) * (1.9 / zoom);
+
+        p2 = abs(vec3(tile) - mod(p2, vec3(tile * 2.0)));
+        p3 = abs(vec3(tile) - mod(p3, vec3(tile * 2.0)));
+
+        t3 = field(p3, u_time);
+
+        float pa, a = pa = 0.0;
+        for (int i = 0; i < iterations; i++) {
+            p2 = abs(p2) / dot(p2, p2) - formuparam;
+            float D = abs(length(p2) - pa);
+            
+            if (i > 2) {
+                a += i > 7 ? min(12.0, D) : D;
+            }
+            pa = length(p2);
+        }
+
+        a *= a * a;
+        float s1 = s + zoffset;
+        float fade = pow(distfading, max(0.0, float(r) - sampleShift));
+
+        v += fade;
+
+        if (r == 0)
+            fade *= (1.0 - sampleShift);
+        if (r == volsteps - 1)
+            fade *= sampleShift;
+            
+        v += vec3(s1, s1 * s1, s1 * s1 * s1 * s1) * a * brightness * fade;
+        backCol2 += vec3(0.20 * t3 * t3 * t3, 0.4 * t3 * t3, t3 * 0.7) * fade;
+
+        s += stepsize;
+        s3 += stepsize;
+    }
+
+    v = mix(vec3(length(v)), v, saturation);
+    vec4 forCol2 = vec4(v * 0.01, 1.0);
+    backCol2 *= cloud;
+
+    gl_FragColor = forCol2 + vec4(backCol2 * 0.6, 1.0);
+}
+)";
 
 class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer_interaction_t
 {
@@ -283,6 +522,10 @@ void schedule_instructions(
     const wf::render_target_t& target, wf::region_t& damage) override
 {
 
+        if (self->cube->enable_caps)
+    {
+        self->cube->render_cap_textures();
+    }
 
     for (auto& fb : framebuffers_windows)
     {
@@ -403,7 +646,7 @@ if (view_tex.tex_id == 0)
     continue;
 }
 
-auto og = bbox;
+//auto og = bbox;
 wlr_fbox src_box{0, 0, (float)vg.width, (float)vg.height};
 
 // FIX: Use workspace-local coordinates
@@ -499,7 +742,7 @@ if (view_tex.tex_id == 0)
     continue;
 }
 
-auto og = bbox;
+//auto og = bbox;
 wlr_fbox src_box{0, 0, (float)vg.width, (float)vg.height};
 
 // FIX: Use workspace-local coordinates
@@ -548,6 +791,14 @@ view_buffer.free();
     
 
 }
+
+    void update_cap_textures_in_schedule()
+    {
+        if (!self->cube->enable_caps)
+            return;
+            
+        self->cube->render_cap_textures();
+    }
 
 // NEW: Helper to render a view to a buffer
 void render_view_to_buffer(wayfire_view view, wf::auxilliary_buffer_t& buffer)
@@ -730,6 +981,25 @@ private:
     wf::option_wrapper_t<bool> enable_window_popout{"cube/enable_window_popout"};
     wf::option_wrapper_t<double> popout_scale{"cube/popout_scale"};  // e.g., 1.15 = 15% larger
     wf::option_wrapper_t<double> popout_opacity{"cube/popout_opacity"};  // 0.0 to 1.0
+    OpenGL::program_t cap_program;  // Separate program for caps
+    wf::option_wrapper_t<bool> enable_caps{"cube/enable_caps"};
+    wf::option_wrapper_t<double> cap_alpha{"cube/cap_alpha"};
+    wf::option_wrapper_t<wf::color_t> cap_color_top{"cube/cap_color_top"};
+    wf::option_wrapper_t<wf::color_t> cap_color_bottom{"cube/cap_color_bottom"};
+    wf::option_wrapper_t<std::string> cap_texture_top{"cube/cap_texture_top"};
+    wf::option_wrapper_t<std::string> cap_texture_bottom{"cube/cap_texture_bottom"};
+    
+    OpenGL::program_t background_program;
+    GLuint background_vbo = 0;
+
+
+    // Cap textures/buffers
+    wf::auxilliary_buffer_t top_cap_buffer;
+    wf::auxilliary_buffer_t bottom_cap_buffer;
+    
+    // Loaded cap texture images
+    GLuint top_cap_texture_id = 0;
+    GLuint bottom_cap_texture_id = 0;
 
     /* the Z camera distance so that (-1, 1) is mapped to the whole screen
      * for the given FOV */
@@ -830,51 +1100,113 @@ private:
         }
     }
 
-    void load_program()
+void load_program()
+{
+#ifdef USE_GLES32
+    std::string ext_string(reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS)));
+    tessellation_support = ext_string.find(std::string("GL_EXT_tessellation_shader")) !=
+        std::string::npos;
+#else
+    tessellation_support = false;
+#endif
+
+    if (!tessellation_support)
+    {
+        program.set_simple(OpenGL::compile_program(cube_vertex_2_0, cube_fragment_2_0));
+        // Load cap program in non-tessellation mode
+        cap_program.set_simple(OpenGL::compile_program(cube_cap_vertex, cube_cap_fragment));
+    } else
     {
 #ifdef USE_GLES32
-        std::string ext_string(reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS)));
-        tessellation_support = ext_string.find(std::string("GL_EXT_tessellation_shader")) !=
-            std::string::npos;
-#else
-        tessellation_support = false;
+        auto id = GL_CALL(glCreateProgram());
+        GLuint vss, fss, tcs, tes, gss;
+
+        vss = OpenGL::compile_shader(cube_vertex_3_2, GL_VERTEX_SHADER);
+        fss = OpenGL::compile_shader(cube_fragment_3_2, GL_FRAGMENT_SHADER);
+        tcs = OpenGL::compile_shader(cube_tcs_3_2, GL_TESS_CONTROL_SHADER);
+        tes = OpenGL::compile_shader(cube_tes_3_2, GL_TESS_EVALUATION_SHADER);
+        gss = OpenGL::compile_shader(cube_geometry_3_2, GL_GEOMETRY_SHADER);
+
+        GL_CALL(glAttachShader(id, vss));
+        GL_CALL(glAttachShader(id, tcs));
+        GL_CALL(glAttachShader(id, tes));
+        GL_CALL(glAttachShader(id, gss));
+        GL_CALL(glAttachShader(id, fss));
+
+        GL_CALL(glLinkProgram(id));
+        GL_CALL(glUseProgram(id));
+
+        GL_CALL(glDeleteShader(vss));
+        GL_CALL(glDeleteShader(fss));
+        GL_CALL(glDeleteShader(tcs));
+        GL_CALL(glDeleteShader(tes));
+        GL_CALL(glDeleteShader(gss));
+        
+        program.set_simple(id);
+        cap_program.set_simple(OpenGL::compile_program(cube_cap_vertex, cube_cap_fragment));
 #endif
-
-        if (!tessellation_support)
-        {
-            program.set_simple(OpenGL::compile_program(cube_vertex_2_0, cube_fragment_2_0));
-        } else
-        {
-#ifdef USE_GLES32
-            auto id = GL_CALL(glCreateProgram());
-            GLuint vss, fss, tcs, tes, gss;
-
-            vss = OpenGL::compile_shader(cube_vertex_3_2, GL_VERTEX_SHADER);
-            fss = OpenGL::compile_shader(cube_fragment_3_2, GL_FRAGMENT_SHADER);
-            tcs = OpenGL::compile_shader(cube_tcs_3_2, GL_TESS_CONTROL_SHADER);
-            tes = OpenGL::compile_shader(cube_tes_3_2, GL_TESS_EVALUATION_SHADER);
-            gss = OpenGL::compile_shader(cube_geometry_3_2, GL_GEOMETRY_SHADER);
-
-            GL_CALL(glAttachShader(id, vss));
-            GL_CALL(glAttachShader(id, tcs));
-            GL_CALL(glAttachShader(id, tes));
-            GL_CALL(glAttachShader(id, gss));
-            GL_CALL(glAttachShader(id, fss));
-
-            GL_CALL(glLinkProgram(id));
-            GL_CALL(glUseProgram(id));
-
-            GL_CALL(glDeleteShader(vss));
-            GL_CALL(glDeleteShader(fss));
-            GL_CALL(glDeleteShader(tcs));
-            GL_CALL(glDeleteShader(tes));
-            GL_CALL(glDeleteShader(gss));
-            program.set_simple(id);
-#endif
-        }
-
-        animation.projection = glm::perspective(45.0f, 1.f, 0.1f, 100.f);
     }
+
+    // Load background shader program
+    background_program.set_simple(OpenGL::compile_program(
+        background_vertex_shader, background_fragment_shader));
+    
+    // Create fullscreen quad VBO for background
+    if (background_vbo == 0)
+    {
+        static const GLfloat quad_vertices[] = {
+            -1.0f, -1.0f,
+             1.0f, -1.0f,
+            -1.0f,  1.0f,
+             1.0f,  1.0f
+        };
+        
+        GL_CALL(glGenBuffers(1, &background_vbo));
+        GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, background_vbo));
+        GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(quad_vertices), 
+                             quad_vertices, GL_STATIC_DRAW));
+        GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));
+    }
+
+    animation.projection = glm::perspective(45.0f, 1.f, 0.1f, 100.f);
+}
+
+
+void render_shader_background(const wf::render_target_t& target)
+{
+    if (background_program.get_program_id(wf::TEXTURE_TYPE_RGBA) == 0)
+    {
+        return;
+    }
+    
+    // Render with depth test, but write max depth
+    GL_CALL(glEnable(GL_DEPTH_TEST));
+    GL_CALL(glDepthFunc(GL_LEQUAL));  // Use LEQUAL
+    GL_CALL(glDepthMask(GL_TRUE));
+    
+    background_program.use(wf::TEXTURE_TYPE_RGBA);
+    
+    static auto start_time = std::chrono::steady_clock::now();
+    auto current_time = std::chrono::steady_clock::now();
+    float elapsed = std::chrono::duration<float>(current_time - start_time).count();
+    background_program.uniform1f("u_time", elapsed);
+    
+    auto geom = output->get_layout_geometry();
+    background_program.uniform2f("u_resolution", (float)geom.width, (float)geom.height);
+    
+    GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, background_vbo));
+    background_program.attrib_pointer("position", 2, 0, nullptr);
+    
+    GL_CALL(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+    
+    GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));
+    background_program.deactivate();
+    
+    // Restore GL_LESS for cube
+    GL_CALL(glDepthFunc(GL_LESS));
+}
+
+
 
     wf::signal::connection_t<cube_control_signal> on_cube_control = [=] (cube_control_signal *d)
     {
@@ -1306,78 +1638,262 @@ void render_cube(GLuint front_face, std::vector<wf::auxilliary_buffer_t>& buffer
     }
 }
 
-void render(const wf::scene::render_instruction_t& data, 
-            std::vector<wf::auxilliary_buffer_t>& buffers, 
-            std::vector<std::vector<wf::auxilliary_buffer_t>>& buffers_rows,
-            std::vector<wf::auxilliary_buffer_t>& buffers_windows,
-            std::vector<std::vector<wf::auxilliary_buffer_t>>& buffers_windows_rows)
+
+std::vector<GLfloat> generate_cap_vertices(int num_sides)
 {
-    data.pass->custom_gles_subpass([&]
+    std::vector<GLfloat> vertices;
+    
+    // Center point
+    vertices.push_back(0.0f);
+    vertices.push_back(0.0f);
+    
+    // Calculate the proper radius
+    // The cube face is a square with side length 1.0
+    // From the center of the cube to the middle of a face edge is identity_z_offset
+    // But we need to reach the CORNER of the face, which is further
+    
+    // For a cube face at distance identity_z_offset:
+    // The face is 1.0 x 1.0 (from -0.5 to +0.5 in both directions)
+    // The distance from center to corner of the face is:
+    // sqrt(identity_z_offset^2 + 0.5^2 + 0.5^2)
+    // But we're looking at it from above, so we need the horizontal distance
+    
+    // Actually, simpler approach:
+    // At the cap position (top/bottom of cube), the cube extends from:
+    // -0.5 to +0.5 in X and Z directions
+    // So the cap should have radius that reaches to the corners: sqrt(0.5^2 + 0.5^2)
+    // But we also need to account for identity_z_offset positioning
+    
+    // CORRECT calculation:
+    // Each cube face is positioned at identity_z_offset from center
+    // The face spans -0.5 to +0.5 in height/width
+    // When looking down from top, we see a regular polygon
+    // The radius should be such that the polygon edges touch the cube face edges
+    
+    // For a regular polygon inscribed to touch the cube:
+    // radius = identity_z_offset / cos(side_angle/2)
+    float cap_radius = identity_z_offset / std::cos(animation.side_angle / 2.0f);
+    
+    // Generate perimeter vertices
+    for (int i = 0; i <= num_sides; i++)
     {
-        if (program.get_program_id(wf::TEXTURE_TYPE_RGBA) == 0)
+        float angle = (float)i * animation.side_angle;
+        float x = cap_radius * std::sin(angle);
+        float z = cap_radius * std::cos(angle);
+        vertices.push_back(x);
+        vertices.push_back(z);
+    }
+    
+    return vertices;
+}
+    
+    // Generate UV coordinates for cap
+    std::vector<GLfloat> generate_cap_uvs(int num_sides)
+    {
+        std::vector<GLfloat> uvs;
+        
+        // Center UV
+        uvs.push_back(0.5f);
+        uvs.push_back(0.5f);
+        
+        // Perimeter UVs
+        for (int i = 0; i <= num_sides; i++)
         {
-            load_program();
+            float angle = (float)i * animation.side_angle;
+            float u = 0.5f + 0.5f * std::sin(angle);
+            float v = 0.5f + 0.5f * std::cos(angle);
+            uvs.push_back(u);
+            uvs.push_back(v);
         }
+        
+        return uvs;
+    }
+    
+    // Render a cap (top or bottom)
+// The problem: Your depth offset is pushing the top cap AWAY from camera
+// and bottom cap TOWARD camera, but it should be the opposite!
 
-        // Clear both color and depth buffers at the start
-GL_CALL(glClearColor(0.0f, 0.0f, 0.0f, 0.0f));
+void render_cap(bool is_top, float vertical_offset, const wf::render_target_t& target)
+{
+  if (!enable_caps)
+        return;
+        
+    int num_sides = get_num_faces();
+    auto vertices = generate_cap_vertices(num_sides);
+    auto uvs = generate_cap_uvs(num_sides);
+    
+    if (cap_program.get_program_id(wf::TEXTURE_TYPE_RGBA) == 0)
+    {
+        cap_program.set_simple(OpenGL::compile_program(cube_cap_vertex, cube_cap_fragment));
+    }
+    
+    GL_CALL(glEnable(GL_BLEND));
+    GL_CALL(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    GL_CALL(glEnable(GL_DEPTH_TEST));
+    GL_CALL(glDepthFunc(GL_LEQUAL));  // Use LEQUAL to allow equal depth values
+    GL_CALL(glDepthMask(GL_TRUE));
+    
+    cap_program.use(wf::TEXTURE_TYPE_RGBA);
+    cap_program.attrib_pointer("position", 2, 0, vertices.data());
+    cap_program.attrib_pointer("uvPosition", 2, 0, uvs.data());
+    
+    float y_pos = vertical_offset;
+    // No depth offset at all
+    
+    glm::mat4 model(1.0f);
+    float alignment_rotation = animation.side_angle / 2.0f;
+    model = glm::rotate(model, alignment_rotation, glm::vec3(0.0f, 1.0f, 0.0f));
+    model = glm::rotate(model, (float)animation.cube_animation.rotation, glm::vec3(0.0f, 1.0f, 0.0f));
+    model = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, y_pos, 0.0f)) * model;
+    
+    auto vp = calculate_vp_matrix(target);
+    cap_program.uniformMatrix4f("VP", vp);
+    cap_program.uniformMatrix4f("model", model);
+    cap_program.uniform1f("cap_alpha", (float)cap_alpha);
+    
+    static auto start_time = std::chrono::steady_clock::now();
+    auto current_time = std::chrono::steady_clock::now();
+    float elapsed = std::chrono::duration<float>(current_time - start_time).count();
+    cap_program.uniform1f("time", elapsed);
+    
+    auto& buffer = is_top ? top_cap_buffer : bottom_cap_buffer;
+    auto tex_id = wf::gles_texture_t::from_aux(buffer).tex_id;
+    GL_CALL(glBindTexture(GL_TEXTURE_2D, tex_id));
+    
+    GL_CALL(glDisable(GL_CULL_FACE));
+    GL_CALL(glDrawArrays(GL_TRIANGLE_FAN, 0, num_sides + 2));
+    
+    cap_program.deactivate();
+}
 
-// NEW: Enable depth test BEFORE clearing
-GL_CALL(glEnable(GL_DEPTH_TEST));
-GL_CALL(glDepthFunc(GL_LESS));
-GL_CALL(glDepthMask(GL_TRUE));
 
-// Now clear with depth test enabled
-GL_CALL(glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT));
+    
+    // Render cap textures (call this in schedule_instructions)
+void render_cap_textures()
+{
+    if (!enable_caps)
+        return;
+        
+    const float scale = output->handle->scale;
+    auto bbox = output->get_layout_geometry();
+    
+    // Allocate cap buffers
+    top_cap_buffer.allocate(wf::dimensions(bbox), scale);
+    bottom_cap_buffer.allocate(wf::dimensions(bbox), scale);
+    
+    // Get the actual color values (cast option_wrapper to wf::color_t)
+    wf::color_t top_color = cap_color_top;
+    wf::color_t bottom_color = cap_color_bottom;
+    
+    // Render top cap
+    wf::render_target_t top_target{top_cap_buffer};
+    top_target.geometry = bbox;
+    top_target.scale = scale;
+    
+    wf::gles::bind_render_buffer(top_target);
+    // Use 1.0f for alpha - transparency is controlled by cap_alpha uniform
+   GL_CALL(glClearColor(top_color.r, top_color.g, top_color.b, 1.0f));
+    GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
+    
+    // Render bottom cap
+    wf::render_target_t bottom_target{bottom_cap_buffer};
+    bottom_target.geometry = bbox;
+    bottom_target.scale = scale;
+    
+    wf::gles::bind_render_buffer(bottom_target);
+    // Use 1.0f for alpha here too
+    GL_CALL(glClearColor(bottom_color.r, bottom_color.g, bottom_color.b, 1.0f));
+    GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
+}
+    
 
-background->render_frame(data.target, animation);
+// The issue: Your render() function is calculating vertical_offset for cube rows,
+// but the calls to render_cap might not be using the right offsets
 
-auto vp = calculate_vp_matrix(data.target);
+// Looking at your render() function, you should be calling:
 
-program.use(wf::TEXTURE_TYPE_RGBA);
+    void render(const wf::scene::render_instruction_t& data, 
+                std::vector<wf::auxilliary_buffer_t>& buffers, 
+                std::vector<std::vector<wf::auxilliary_buffer_t>>& buffers_rows,
+                std::vector<wf::auxilliary_buffer_t>& buffers_windows,
+                std::vector<std::vector<wf::auxilliary_buffer_t>>& buffers_windows_rows)
+    {
+        data.pass->custom_gles_subpass([&]
+        {
+            if (program.get_program_id(wf::TEXTURE_TYPE_RGBA) == 0)
+            {
+                load_program();
+            }
 
+            GL_CALL(glClearColor(0.0f, 0.0f, 0.0f, 1.0f));
+            GL_CALL(glEnable(GL_DEPTH_TEST));
+            GL_CALL(glDepthFunc(GL_LESS));
+            GL_CALL(glDepthMask(GL_TRUE));
+            GL_CALL(glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT));
 
+            // RENDER SHADER BACKGROUND FIRST (replaces background->render_frame)
+            render_shader_background(data.target);
 
-        static GLfloat vertexData[] = {
-            -0.5, 0.5,
-            0.5, 0.5,
-            0.5, -0.5,
-            -0.5, -0.5
-        };
+             GL_CALL(glClear(GL_DEPTH_BUFFER_BIT));
 
-        static GLfloat coordData[] = {
-            0.0f, 1.0f,
-            1.0f, 1.0f,
-            1.0f, 0.0f,
-            0.0f, 0.0f
-        };
+            auto vp = calculate_vp_matrix(data.target);
+            program.use(wf::TEXTURE_TYPE_RGBA);
 
+            static GLfloat vertexData[] = {
+                -0.5, 0.5,
+                0.5, 0.5,
+                0.5, -0.5,
+                -0.5, -0.5
+            };
+
+            static GLfloat coordData[] = {
+                0.0f, 1.0f,
+                1.0f, 1.0f,
+                1.0f, 0.0f,
+                0.0f, 0.0f
+            };
+
+            program.attrib_pointer("position", 2, 0, vertexData);
+            program.attrib_pointer("uvPosition", 2, 0, coordData);
+            program.uniformMatrix4f("VP", vp);
+            
+            if (tessellation_support)
+            {
+                program.uniform1i("deform", use_deform);
+                program.uniform1i("light", use_light);
+                program.uniform1f("ease", animation.cube_animation.ease_deformation);
+                
+                GLint loc = glGetUniformLocation(program.get_program_id(wf::TEXTURE_TYPE_RGBA), "cameraYOffset");
+                if (loc >= 0)
+                {
+                    GL_CALL(glUniform1f(loc, camera_y_offset));
+                }
+            }
+
+            GL_CALL(glEnable(GL_CULL_FACE));
+            GL_CALL(glEnable(GL_BLEND));
+            GL_CALL(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+            
+ 
+        // RENDER BOTTOM CAPS FIRST
+        // render_cap handles its own state, so just call it
+        for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
+        {
+            float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
+            float cap_y = vertical_offset - 0.5f;
+            render_cap(false, cap_y, data.target);
+        }
+        render_cap(false, -0.5f, data.target);
+        
+        // RESTORE CUBE PROGRAM STATE after caps
+        program.use(wf::TEXTURE_TYPE_RGBA);
         program.attrib_pointer("position", 2, 0, vertexData);
         program.attrib_pointer("uvPosition", 2, 0, coordData);
         program.uniformMatrix4f("VP", vp);
-        if (tessellation_support)
-        {
-            program.uniform1i("deform", use_deform);
-            program.uniform1i("light", use_light);
-            program.uniform1f("ease",
-                animation.cube_animation.ease_deformation);
-            
-            GLint loc = glGetUniformLocation(program.get_program_id(wf::TEXTURE_TYPE_RGBA), "cameraYOffset");
-            if (loc >= 0)
-            {
-                GL_CALL(glUniform1f(loc, camera_y_offset));
-            }
-        }
-
         GL_CALL(glEnable(GL_CULL_FACE));
+        GL_CALL(glDepthMask(GL_TRUE));  // Restore depth writing for cubes
         
-        // Enable blending for transparency support
-        GL_CALL(glEnable(GL_BLEND));
-        GL_CALL(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-        
-        // ===== RENDER REGULAR CUBES (with background) =====
-        
-        // Render back faces (CCW) of all regular cubes from bottom to top
+        // RENDER CUBE BACK FACES
         for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
         {
             float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
@@ -1385,7 +1901,7 @@ program.use(wf::TEXTURE_TYPE_RGBA);
         }
         render_cube(GL_CCW, buffers, 0.0f, 1.0f);
         
-        // Render front faces (CW) of all regular cubes from bottom to top
+        // RENDER CUBE FRONT FACES
         for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
         {
             float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
@@ -1393,48 +1909,51 @@ program.use(wf::TEXTURE_TYPE_RGBA);
         }
         render_cube(GL_CW, buffers, 0.0f, 1.0f);
         
-        // ===== RENDER WINDOW-ONLY POPOUT CUBES (larger, transparent) =====
+        // RENDER TOP CAPS LAST
+        // Caps handle their own blending/depth state
+        render_cap(true, 0.5f, data.target);
+        for (int row = (int)buffers_rows.size() - 1; row >= 0; row--)
+        {
+            float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
+            float cap_y = vertical_offset + 0.5f;
+            render_cap(true, cap_y, data.target);
+        }
         
-        // ===== RENDER WINDOW-ONLY POPOUT CUBES (larger, transparent) =====
-
-
-// Right before rendering window cubes
-GLint depth_func;
-GL_CALL(glGetIntegerv(GL_DEPTH_FUNC, &depth_func));
-//LOGI("Depth func before window cubes: ", depth_func, " (should be ", GL_LESS, ")");
-
-
-if (enable_window_popout)
-{
-    // Force reset depth state before rendering popout cubes
-    GL_CALL(glDepthFunc(GL_LESS));
-    GL_CALL(glDepthMask(GL_TRUE));
-    
-    float scale = popout_scale_animation;
-    
-    // Render back faces (CCW) of all window-only cubes from bottom to top
-    for (int row = (int)buffers_windows_rows.size() - 1; row >= 0; row--)
-    {
-        float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
-        render_cube(GL_CCW, buffers_windows_rows[row], vertical_offset, scale);
-    }
-    render_cube(GL_CCW, buffers_windows, 0.0f, scale);
-    
-    // Render front faces (CW) of all window-only cubes from bottom to top
-    for (int row = (int)buffers_windows_rows.size() - 1; row >= 0; row--)
-    {
-        float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
-        render_cube(GL_CW, buffers_windows_rows[row], vertical_offset, scale);
-    }
-    render_cube(GL_CW, buffers_windows, 0.0f, scale);
-}
+        // RESTORE STATE for window popout cubes
+        program.use(wf::TEXTURE_TYPE_RGBA);
+        program.attrib_pointer("position", 2, 0, vertexData);
+        program.attrib_pointer("uvPosition", 2, 0, coordData);
+        program.uniformMatrix4f("VP", vp);
+        GL_CALL(glEnable(GL_CULL_FACE));
+        GL_CALL(glDepthFunc(GL_LESS));
+        GL_CALL(glDepthMask(GL_TRUE));
         
-        GL_CALL(glDisable(GL_BLEND));
-        GL_CALL(glDisable(GL_CULL_FACE));
-        GL_CALL(glDisable(GL_DEPTH_TEST));
-        program.deactivate();
-    });
-}
+        if (enable_window_popout)
+        {
+            float scale = popout_scale_animation;
+            
+            for (int row = (int)buffers_windows_rows.size() - 1; row >= 0; row--)
+            {
+                float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
+                render_cube(GL_CCW, buffers_windows_rows[row], vertical_offset, scale);
+            }
+            render_cube(GL_CCW, buffers_windows, 0.0f, scale);
+            
+            for (int row = (int)buffers_windows_rows.size() - 1; row >= 0; row--)
+            {
+                float vertical_offset = -(row + 1) * CUBE_VERTICAL_SPACING;
+                render_cube(GL_CW, buffers_windows_rows[row], vertical_offset, scale);
+            }
+            render_cube(GL_CW, buffers_windows, 0.0f, scale);
+        }
+            
+            GL_CALL(glDisable(GL_BLEND));
+            GL_CALL(glDisable(GL_CULL_FACE));
+            GL_CALL(glDisable(GL_DEPTH_TEST));
+            program.deactivate();
+        });
+    }
+
 
 wf::effect_hook_t pre_hook = [=] ()
 {
@@ -1540,6 +2059,25 @@ void pointer_scrolled(double amount)
         wf::gles::run_in_context_if_gles([&]
         {
             program.free_resources();
+            cap_program.free_resources();
+            background_program.free_resources();
+            
+            if (background_vbo)
+            {
+                GL_CALL(glDeleteBuffers(1, &background_vbo));
+            }
+            
+            if (top_cap_texture_id)
+            {
+                GL_CALL(glDeleteTextures(1, &top_cap_texture_id));
+            }
+            if (bottom_cap_texture_id)
+            {
+                GL_CALL(glDeleteTextures(1, &bottom_cap_texture_id));
+            }
+                
+            top_cap_buffer.free();
+            bottom_cap_buffer.free();
         });
     }
 };

@@ -85,6 +85,46 @@
 				<precision>0.01</precision>
 			</option>
 		</group>
+		<!-- Cube Caps -->
+		<group>
+			<_short>Cube Caps</_short>
+			<_long>Settings for the top and bottom caps of the cube.</_long>
+			<option name="enable_caps" type="bool">
+				<_short>Enable caps</_short>
+				<_long>Enables rendering of top and bottom caps on the cube. Caps are N-sided polygons matching the number of workspace faces.</_long>
+				<default>true</default>
+			</option>
+			<option name="cap_alpha" type="double">
+				<_short>Cap transparency</_short>
+				<_long>Sets the transparency of the cube caps. 1.0 = fully opaque, 0.0 = fully transparent.</_long>
+				<default>0.8</default>
+				<min>0.0</min>
+				<max>1.0</max>
+				<precision>0.01</precision>
+			</option>
+			<option name="cap_color_top" type="color">
+				<_short>Top cap color</_short>
+				<_long>Sets the color/tint for the top cap of the cube.</_long>
+				<default>0.1 0.1 0.15 1.0</default>
+			</option>
+			<option name="cap_color_bottom" type="color">
+				<_short>Bottom cap color</_short>
+				<_long>Sets the color/tint for the bottom cap of the cube.</_long>
+				<default>0.15 0.1 0.1 1.0</default>
+			</option>
+			<option name="cap_texture_top" type="string">
+				<_short>Top cap texture</_short>
+				<_long>Loads the specified texture for the top cap. Leave empty to use solid color.</_long>
+				<hint>file</hint>
+				<default></default>
+			</option>
+			<option name="cap_texture_bottom" type="string">
+				<_short>Bottom cap texture</_short>
+				<_long>Loads the specified texture for the bottom cap. Leave empty to use solid color.</_long>
+				<hint>file</hint>
+				<default></default>
+			</option>
+		</group>
 		<!-- Zoom -->
 		<option name="zoom" type="double">
 			<_short>Zoom</_short>
