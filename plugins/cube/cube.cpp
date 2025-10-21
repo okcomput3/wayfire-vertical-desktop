@@ -286,7 +286,6 @@ class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer
     {
 
 // Custom node that filters to show only windows (no background/desktop)
-// Custom node that filters to show only windows (no background/desktop)
 class windows_only_workspace_node_t : public wf::scene::node_t
 {
     wf::output_t *output;
@@ -307,9 +306,10 @@ class windows_only_workspace_node_t : public wf::scene::node_t
             return;
         }
         
-        // Get all views on this workspace
+        // Get all views and filter by workspace
         auto views = output->wset()->get_views();
         
+        int view_count = 0;
         for (auto& view : views)
         {
             if (!view->is_mapped())
@@ -324,13 +324,20 @@ class windows_only_workspace_node_t : public wf::scene::node_t
                 continue;
             }
             
-            // Use root node (includes decorations and should fill the window area)
-            auto view_root = view->get_root_node();
-            if (view_root)
+            view_count++;
+            LOGI("Generating render instances for view on workspace ", workspace.x, ",", workspace.y);
+            
+            // Use root node which includes decorations
+            auto view_node = view->get_root_node();
+            if (view_node)
             {
-                view_root->gen_render_instances(instances, push_damage, shown_on);
+                size_t before = instances.size();
+                view_node->gen_render_instances(instances, push_damage, shown_on);
+                LOGI("Generated ", instances.size() - before, " render instances");
             }
         }
+        
+        LOGI("Total views on workspace ", workspace.x, ",", workspace.y, ": ", view_count);
     }
     
     wf::geometry_t get_bounding_box() override
@@ -398,15 +405,23 @@ class cube_render_instance_t : public wf::scene::render_instance_t
     std::vector<wf::auxilliary_buffer_t> framebuffers_windows;
     std::vector<std::vector<wf::auxilliary_buffer_t>> framebuffers_windows_rows;
     
-    std::vector<std::vector<wf::scene::render_instance_uptr>> ws_instances_windows;
-    std::vector<std::vector<std::vector<wf::scene::render_instance_uptr>>> ws_instances_windows_rows;
-    std::vector<wf::region_t> ws_damage_windows;
-    std::vector<std::vector<wf::region_t>> ws_damage_windows_rows;
+//    std::vector<std::vector<wf::scene::render_instance_uptr>> ws_instances_windows;
+ //   std::vector<std::vector<std::vector<wf::scene::render_instance_uptr>>> ws_instances_windows_rows;
+//    std::vector<wf::region_t> ws_damage_windows;
+//    std::vector<std::vector<wf::region_t>> ws_damage_windows_rows;
+
+// continuous window updates
+std::vector<std::unique_ptr<wf::scene::render_instance_manager_t>> ws_instance_managers_windows;
+std::vector<std::vector<std::unique_ptr<wf::scene::render_instance_manager_t>>> ws_instance_managers_windows_rows;
 
     // Multiple cube workspaces for all rows
     std::vector<std::vector<std::vector<wf::scene::render_instance_uptr>>> ws_instances_rows;
     std::vector<std::vector<wf::region_t>> ws_damage_rows;
     std::vector<std::vector<wf::auxilliary_buffer_t>> framebuffers_rows;
+
+
+    std::vector<wf::region_t> ws_damage_windows;
+    std::vector<std::vector<wf::region_t>> ws_damage_windows_rows;
 
     wf::signal::connection_t<wf::scene::node_damage_signal> on_cube_damage =
         [=] (wf::scene::node_damage_signal *ev)
@@ -415,104 +430,121 @@ class cube_render_instance_t : public wf::scene::render_instance_t
     };
 
   public:
-    cube_render_instance_t(cube_render_node_t *self, wf::scene::damage_callback push_damage)
+   cube_render_instance_t(cube_render_node_t *self, wf::scene::damage_callback push_damage)
+{
+    this->self = std::dynamic_pointer_cast<cube_render_node_t>(self->shared_from_this());
+    this->push_damage = push_damage;
+    self->connect(&on_cube_damage);
+    
+    ws_damage.resize(self->workspaces.size());
+    framebuffers.resize(self->workspaces.size());
+    ws_instances.resize(self->workspaces.size());
+    
+    // Initialize storage for all rows
+    int num_rows = self->workspaces_all_rows.size();
+    ws_damage_rows.resize(num_rows);
+    framebuffers_rows.resize(num_rows);
+    ws_instances_rows.resize(num_rows);
+    
+    // IMPORTANT: Resize window storage BEFORE creating managers
+    ws_damage_windows.resize(self->workspaces_windows.size());
+    framebuffers_windows.resize(self->workspaces_windows.size());
+    ws_instance_managers_windows.resize(self->workspaces_windows.size());
+    
+    ws_damage_windows_rows.resize(num_rows);
+    framebuffers_windows_rows.resize(num_rows);
+    ws_instance_managers_windows_rows.resize(num_rows);
+    
+    for (int row = 0; row < num_rows; row++)
     {
-        this->self = std::dynamic_pointer_cast<cube_render_node_t>(self->shared_from_this());
-        this->push_damage = push_damage;
-        self->connect(&on_cube_damage);
-
-        ws_damage.resize(self->workspaces.size());
-        framebuffers.resize(self->workspaces.size());
-        ws_instances.resize(self->workspaces.size());
+        ws_damage_windows_rows[row].resize(self->workspaces_windows_rows[row].size());
+        framebuffers_windows_rows[row].resize(self->workspaces_windows_rows[row].size());
+        ws_instance_managers_windows_rows[row].resize(self->workspaces_windows_rows[row].size());
+    }
+    
+    // Initialize top cube workspaces (current row)
+    for (int i = 0; i < (int)self->workspaces.size(); i++)
+    {
+        auto push_damage_child = [=] (const wf::region_t& damage)
+        {
+            ws_damage[i] |= damage;
+            push_damage(self->get_bounding_box());
+        };
         
-        // NEW: Initialize window-only storage for top row
-        ws_damage_windows.resize(self->workspaces_windows.size());
-        framebuffers_windows.resize(self->workspaces_windows.size());
-        ws_instances_windows.resize(self->workspaces_windows.size());
+        self->workspaces[i]->gen_render_instances(ws_instances[i],
+            push_damage_child, self->cube->output);
         
-        // Initialize storage for all rows
-        int num_rows = self->workspaces_all_rows.size();
-        ws_damage_rows.resize(num_rows);
-        framebuffers_rows.resize(num_rows);
-        ws_instances_rows.resize(num_rows);
+        ws_damage[i] |= self->workspaces[i]->get_bounding_box();
+    }
+    
+    // NOW create window managers after everything is resized
+    for (int i = 0; i < (int)self->workspaces_windows.size(); i++)
+    {
+        auto push_damage_child = [this, i] (const wf::region_t& damage)
+        {
+            this->ws_damage_windows[i] |= damage;
+            this->push_damage(this->self->get_bounding_box());
+        };
         
-        // NEW: Initialize window-only storage for all rows
-        ws_damage_windows_rows.resize(num_rows);
-        framebuffers_windows_rows.resize(num_rows);
-        ws_instances_windows_rows.resize(num_rows);
+        std::vector<wf::scene::node_ptr> nodes;
+        nodes.push_back(self->workspaces_windows[i]);
         
-        // Initialize top cube workspaces (current row)
-        for (int i = 0; i < (int)self->workspaces.size(); i++)
+        ws_instance_managers_windows[i] = std::make_unique<wf::scene::render_instance_manager_t>(
+            nodes, push_damage_child, self->cube->output);
+        
+        const int BIG_NUMBER = 1e5;
+        wf::region_t big_region = wf::geometry_t{-BIG_NUMBER, -BIG_NUMBER, 2 * BIG_NUMBER, 2 * BIG_NUMBER};
+        ws_instance_managers_windows[i]->set_visibility_region(big_region);
+        
+        ws_damage_windows[i] |= self->workspaces_windows[i]->get_bounding_box();
+    }
+    
+    // Initialize all other row workspaces
+    for (int row = 0; row < num_rows; row++)
+    {
+        ws_damage_rows[row].resize(self->workspaces_all_rows[row].size());
+        framebuffers_rows[row].resize(self->workspaces_all_rows[row].size());
+        ws_instances_rows[row].resize(self->workspaces_all_rows[row].size());
+        
+        for (int i = 0; i < (int)self->workspaces_all_rows[row].size(); i++)
         {
             auto push_damage_child = [=] (const wf::region_t& damage)
             {
-                ws_damage[i] |= damage;
+                ws_damage_rows[row][i] |= damage;
                 push_damage(self->get_bounding_box());
             };
-
-            self->workspaces[i]->gen_render_instances(ws_instances[i],
+            
+            self->workspaces_all_rows[row][i]->gen_render_instances(ws_instances_rows[row][i],
                 push_damage_child, self->cube->output);
-
-            ws_damage[i] |= self->workspaces[i]->get_bounding_box();
+            
+            ws_damage_rows[row][i] |= self->workspaces_all_rows[row][i]->get_bounding_box();
         }
         
-        // NEW: Initialize top cube window-only workspaces
-        for (int i = 0; i < (int)self->workspaces_windows.size(); i++)
+        // Create window managers for this row
+        for (int i = 0; i < (int)self->workspaces_windows_rows[row].size(); i++)
         {
-            auto push_damage_child = [=] (const wf::region_t& damage)
+            auto push_damage_child = [this, row, i] (const wf::region_t& damage)
             {
-                ws_damage_windows[i] |= damage;
-                push_damage(self->get_bounding_box());
+                this->ws_damage_windows_rows[row][i] |= damage;
+                this->push_damage(this->self->get_bounding_box());
             };
-
-            self->workspaces_windows[i]->gen_render_instances(ws_instances_windows[i],
-                push_damage_child, self->cube->output);
-
-            ws_damage_windows[i] |= self->workspaces_windows[i]->get_bounding_box();
-        }
-        
-        // Initialize all other row workspaces
-        for (int row = 0; row < num_rows; row++)
-        {
-            ws_damage_rows[row].resize(self->workspaces_all_rows[row].size());
-            framebuffers_rows[row].resize(self->workspaces_all_rows[row].size());
-            ws_instances_rows[row].resize(self->workspaces_all_rows[row].size());
             
-            // NEW: Initialize window-only rows
-            ws_damage_windows_rows[row].resize(self->workspaces_windows_rows[row].size());
-            framebuffers_windows_rows[row].resize(self->workspaces_windows_rows[row].size());
-            ws_instances_windows_rows[row].resize(self->workspaces_windows_rows[row].size());
+            std::vector<wf::scene::node_ptr> nodes;
+            nodes.push_back(self->workspaces_windows_rows[row][i]);
             
-            for (int i = 0; i < (int)self->workspaces_all_rows[row].size(); i++)
-            {
-                auto push_damage_child = [=] (const wf::region_t& damage)
-                {
-                    ws_damage_rows[row][i] |= damage;
-                    push_damage(self->get_bounding_box());
-                };
-
-                self->workspaces_all_rows[row][i]->gen_render_instances(ws_instances_rows[row][i],
-                    push_damage_child, self->cube->output);
-
-                ws_damage_rows[row][i] |= self->workspaces_all_rows[row][i]->get_bounding_box();
-            }
+            ws_instance_managers_windows_rows[row][i] = 
+                std::make_unique<wf::scene::render_instance_manager_t>(
+                    nodes, push_damage_child, self->cube->output);
             
-            // NEW: Initialize window-only for this row
-            for (int i = 0; i < (int)self->workspaces_windows_rows[row].size(); i++)
-            {
-                auto push_damage_child = [=] (const wf::region_t& damage)
-                {
-                    ws_damage_windows_rows[row][i] |= damage;
-                    push_damage(self->get_bounding_box());
-                };
-
-                self->workspaces_windows_rows[row][i]->gen_render_instances(ws_instances_windows_rows[row][i],
-                    push_damage_child, self->cube->output);
-
-                ws_damage_windows_rows[row][i] |= self->workspaces_windows_rows[row][i]->get_bounding_box();
-            }
+            const int BIG_NUMBER = 1e5;
+            wf::region_t big_region = wf::geometry_t{-BIG_NUMBER, -BIG_NUMBER, 2 * BIG_NUMBER, 2 * BIG_NUMBER};
+            ws_instance_managers_windows_rows[row][i]->set_visibility_region(big_region);
+            
+            ws_damage_windows_rows[row][i] |= 
+                self->workspaces_windows_rows[row][i]->get_bounding_box();
         }
     }
+}
 
     ~cube_render_instance_t()
     {}
@@ -521,8 +553,7 @@ void schedule_instructions(
     std::vector<wf::scene::render_instruction_t>& instructions,
     const wf::render_target_t& target, wf::region_t& damage) override
 {
-
-        if (self->cube->enable_caps)
+    if (self->cube->enable_caps)
     {
         self->cube->render_cap_textures();
     }
@@ -570,198 +601,44 @@ void schedule_instructions(
         ws_damage[i].clear();
     }
     
-
-// NEW: Render top cube window-only workspaces using snapshots
-for (int i = 0; i < (int)framebuffers_windows.size(); i++)
+    // Render window-only workspaces dynamically (top row)
+   // In schedule_instructions, for the window rendering:
+// In schedule_instructions, fix the render target geometry:
+// In schedule_instructions, for window rendering:
+for (int i = 0; i < (int)ws_instance_managers_windows.size(); i++)
 {
     const float scale = self->cube->output->handle->scale;
     auto bbox = self->cube->output->get_layout_geometry();
     framebuffers_windows[i].allocate(wf::dimensions(bbox), scale);
-    
-    // NEW: Immediately clear the newly allocated framebuffer
-    wf::render_target_t clear_target{framebuffers_windows[i]};
-    clear_target.geometry = bbox;
-    clear_target.scale = scale;
-    wf::gles::bind_render_buffer(clear_target);
-    GL_CALL(glClearColor(0.0f, 0.0f, 0.0f, 0.0f));
-    GL_CALL(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
-    
-    // Calculate which workspace this face represents
+
+    // Calculate which workspace this represents
     auto cws = self->cube->output->wset()->get_current_workspace();
     auto grid = self->cube->output->wset()->get_workspace_grid_size();
     wf::point_t target_ws = {(cws.x + i) % grid.width, cws.y};
-    
-    // Bind framebuffer and clear to transparent
+
     wf::render_target_t fb_target{framebuffers_windows[i]};
-    fb_target.geometry = bbox;
+    fb_target.geometry = wf::geometry_t{
+        bbox.x + target_ws.x * bbox.width,
+        bbox.y + target_ws.y * bbox.height,
+        bbox.width,
+        bbox.height
+    };
     fb_target.scale = scale;
+
+    auto& instances = ws_instance_managers_windows[i]->get_instances();
     
-    wf::gles::bind_render_buffer(fb_target);
-    GL_CALL(glClearColor(0.0f, 0.0f, 0.0f, 0.0f));
-    GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
-    GL_CALL(glEnable(GL_BLEND));
-    GL_CALL(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    // Force full damage to ensure complete redraw
+    wf::region_t full_damage = fb_target.geometry;
     
-    // Get all views on this workspace and snapshot them
-// Get all views on this workspace and render them
-auto views = self->cube->output->wset()->get_views();
-for (auto& view : views)
-{
-    auto view_ws = self->cube->output->wset()->get_view_main_workspace(view);
-    if (view_ws != target_ws)
-    {
-        continue;
-    }
-    
-  //  LOGI("Found view for workspace ", target_ws.x, ",", target_ws.y);
-    
-    // CRITICAL: Force the view to update/render by damaging it
-    view->damage();
-    
-    // Create a render instance manager to make it renderable
-    std::vector<wf::scene::node_ptr> nodes;
-    nodes.push_back(view->get_root_node());
-    auto push_damage_noop = [](wf::region_t){};
-    auto manager = std::make_unique<wf::scene::render_instance_manager_t>(
-        nodes, push_damage_noop, self->cube->output);
-    
-    auto toplevel = wf::toplevel_cast(view);
-    if (!toplevel) continue;
-    auto vg = toplevel->get_geometry();
-    manager->set_visibility_region(vg);
-    
+    wf::render_pass_params_t params;
+    params.instances = &instances;
+    params.damage = full_damage;  // Use full damage, not accumulated damage
+    params.reference_output = self->cube->output;
+    params.target = fb_target;
+    params.flags = wf::RPASS_CLEAR_BACKGROUND | wf::RPASS_EMIT_SIGNALS;
 
-// NOW take snapshot - the manager makes it renderable
-// NOW take snapshot - the manager makes it renderable
-wf::auxilliary_buffer_t view_buffer;
-view->take_snapshot(view_buffer);
-
-auto view_tex = wf::gles_texture_t::from_aux(view_buffer);
-//LOGI("Snapshot tex_id: ", view_tex.tex_id, " for workspace ", target_ws.x, ",", target_ws.y);
-
-if (view_tex.tex_id == 0)
-{
-  //  LOGE("Failed to get snapshot for view on workspace ", target_ws.x, ",", target_ws.y);
-    view_buffer.free();
-    continue;
-}
-
-//auto og = bbox;
-wlr_fbox src_box{0, 0, (float)vg.width, (float)vg.height};
-
-// FIX: Use workspace-local coordinates
-auto ws_geo = self->cube->output->get_layout_geometry();
-wf::geometry_t dst_box{
-    vg.x - (ws_geo.x + target_ws.x * ws_geo.width),
-    vg.y - (ws_geo.y + target_ws.y * ws_geo.height),
-    vg.width, 
-    vg.height
-};
-
-//LOGI("Blitting to dst: ", dst_box.x, ",", dst_box.y, " size ", dst_box.width, "x", dst_box.height);
-
-fb_target.blit(view_buffer, src_box, dst_box);
-view_buffer.free();
-
-
-
-}
-    
-    GL_CALL(glDisable(GL_BLEND));
-}
-    
-// NEW: Render all other row window-only workspaces using snapshots
-for (int row = 0; row < (int)framebuffers_windows_rows.size(); row++)
-{
-    for (int i = 0; i < (int)framebuffers_windows_rows[row].size(); i++)
-    {
-        const float scale = self->cube->output->handle->scale;
-        auto bbox = self->cube->output->get_layout_geometry();
-        framebuffers_windows_rows[row][i].allocate(wf::dimensions(bbox), scale);
-        
-        // Calculate workspace for this row
-        auto cws = self->cube->output->wset()->get_current_workspace();
-        auto grid = self->cube->output->wset()->get_workspace_grid_size();
-        int target_y = (cws.y + row + 1) % grid.height;
-        wf::point_t target_ws = {(cws.x + i) % grid.width, target_y};
-        
-      //  LOGI("Rendering row ", row, " face ", i, " workspace ", target_ws.x, ",", target_ws.y);
-        
-        // Bind framebuffer and clear to transparent
-        wf::render_target_t fb_target{framebuffers_windows_rows[row][i]};
-        fb_target.geometry = bbox;
-        fb_target.scale = scale;
-        
-        wf::gles::bind_render_buffer(fb_target);
-        GL_CALL(glClearColor(0.0f, 0.0f, 0.0f, 0.0f));
-        GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
-        GL_CALL(glEnable(GL_BLEND));
-        GL_CALL(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-        
-        // Get all views on this workspace and render them
-// Get all views on this workspace and render them
-auto views = self->cube->output->wset()->get_views();
-for (auto& view : views)
-{
-    auto view_ws = self->cube->output->wset()->get_view_main_workspace(view);
-    if (view_ws != target_ws)
-    {
-        continue;
-    }
-    
-   // LOGI("Found view for workspace ", target_ws.x, ",", target_ws.y);
-    
-    // CRITICAL: Force the view to update/render by damaging it
-    view->damage();
-    
-    // Create a render instance manager to make it renderable
-    std::vector<wf::scene::node_ptr> nodes;
-    nodes.push_back(view->get_root_node());
-    auto push_damage_noop = [](wf::region_t){};
-    auto manager = std::make_unique<wf::scene::render_instance_manager_t>(
-        nodes, push_damage_noop, self->cube->output);
-    
-    auto toplevel = wf::toplevel_cast(view);
-    if (!toplevel) continue;
-    auto vg = toplevel->get_geometry();
-    manager->set_visibility_region(vg);
-    
-    // NOW take snapshot - the manager makes it renderable
-// NOW take snapshot - the manager makes it renderable
-// NOW take snapshot - the manager makes it renderable
-wf::auxilliary_buffer_t view_buffer;
-view->take_snapshot(view_buffer);
-
-auto view_tex = wf::gles_texture_t::from_aux(view_buffer);
-//LOGI("Snapshot tex_id: ", view_tex.tex_id, " for workspace ", target_ws.x, ",", target_ws.y);
-
-if (view_tex.tex_id == 0)
-{
- //   LOGE("Failed to get snapshot for view on workspace ", target_ws.x, ",", target_ws.y);
-    view_buffer.free();
-    continue;
-}
-
-//auto og = bbox;
-wlr_fbox src_box{0, 0, (float)vg.width, (float)vg.height};
-
-// FIX: Use workspace-local coordinates
-auto ws_geo = self->cube->output->get_layout_geometry();
-wf::geometry_t dst_box{
-    vg.x - (ws_geo.x + target_ws.x * ws_geo.width),
-    vg.y - (ws_geo.y + target_ws.y * ws_geo.height),
-    vg.width, 
-    vg.height
-};
-
-//LOGI("Blitting to dst: ", dst_box.x, ",", dst_box.y, " size ", dst_box.width, "x", dst_box.height);
-
-fb_target.blit(view_buffer, src_box, dst_box);
-view_buffer.free();
-}
-        
-        GL_CALL(glDisable(GL_BLEND));
-    }
+    wf::render_pass_t::run(params);
+    ws_damage_windows[i].clear();
 }
 
     // Render all other row workspaces - WITH BACKGROUND
@@ -782,14 +659,52 @@ view_buffer.free();
             params.damage    = ws_damage_rows[row][i];
             params.reference_output = self->cube->output;
             params.target = target;
-            params.flags  = wf::RPASS_CLEAR_BACKGROUND | wf::RPASS_EMIT_SIGNALS;  // FIXED
+            params.flags  = wf::RPASS_CLEAR_BACKGROUND | wf::RPASS_EMIT_SIGNALS;
 
             wf::render_pass_t::run(params);
             ws_damage_rows[row][i].clear();
         }
     }
     
+    // Render window-only workspaces dynamically (other rows)
+for (int row = 0; row < (int)ws_instance_managers_windows_rows.size(); row++)
+{
+    for (int i = 0; i < (int)ws_instance_managers_windows_rows[row].size(); i++)
+    {
+        const float scale = self->cube->output->handle->scale;
+        auto bbox = self->cube->output->get_layout_geometry();
+        framebuffers_windows_rows[row][i].allocate(wf::dimensions(bbox), scale);
 
+        auto cws = self->cube->output->wset()->get_current_workspace();
+        auto grid = self->cube->output->wset()->get_workspace_grid_size();
+        int target_y = (cws.y + row + 1) % grid.height;
+        wf::point_t target_ws = {(cws.x + i) % grid.width, target_y};
+
+        wf::render_target_t fb_target{framebuffers_windows_rows[row][i]};
+        fb_target.geometry = wf::geometry_t{
+            bbox.x + target_ws.x * bbox.width,
+            bbox.y + target_ws.y * bbox.height,
+            bbox.width,
+            bbox.height
+        };
+        fb_target.scale = scale;
+
+        auto& instances = ws_instance_managers_windows_rows[row][i]->get_instances();
+        
+        // Force full damage to ensure complete redraw
+        wf::region_t full_damage = fb_target.geometry;
+        
+        wf::render_pass_params_t params;
+        params.instances = &instances;
+        params.damage = full_damage;  // Use full damage, not accumulated damage
+        params.reference_output = self->cube->output;
+        params.target = fb_target;
+        params.flags = wf::RPASS_CLEAR_BACKGROUND | wf::RPASS_EMIT_SIGNALS;
+
+        wf::render_pass_t::run(params);
+        ws_damage_windows_rows[row][i].clear();
+    }
+}
 }
 
     void update_cap_textures_in_schedule()
@@ -865,39 +780,53 @@ void render(const wf::scene::render_instruction_t& data) override
         }
         
         // NEW: Compute visibility for window-only top row
-        for (int i = 0; i < (int)self->workspaces_windows.size(); i++)
-        {
-            wf::region_t ws_region = self->workspaces_windows[i]->get_bounding_box();
-            for (auto& ch : this->ws_instances_windows[i])
-            {
-                ch->compute_visibility(output, ws_region);
-            }
-        }
+for (int i = 0; i < (int)ws_instance_managers_windows.size(); i++)
+{
+    wf::region_t ws_region = self->workspaces_windows[i]->get_bounding_box();
+    for (auto& ch : ws_instance_managers_windows[i]->get_instances())
+    {
+        ch->compute_visibility(output, ws_region);
+    }
+}
         
-        for (int row = 0; row < (int)self->workspaces_all_rows.size(); row++)
+       for (int row = 0; row < (int)ws_instance_managers_windows_rows.size(); row++)
+{
+    for (int i = 0; i < (int)ws_instance_managers_windows_rows[row].size(); i++)
+    {
+        wf::region_t ws_region = self->workspaces_windows_rows[row][i]->get_bounding_box();
+        for (auto& ch : ws_instance_managers_windows_rows[row][i]->get_instances())
         {
-            for (int i = 0; i < (int)self->workspaces_all_rows[row].size(); i++)
-            {
-                wf::region_t ws_region = self->workspaces_all_rows[row][i]->get_bounding_box();
-                for (auto& ch : this->ws_instances_rows[row][i])
-                {
-                    ch->compute_visibility(output, ws_region);
-                }
-            }
+            ch->compute_visibility(output, ws_region);
         }
+    }
+}
         
         // NEW: Compute visibility for window-only other rows
-        for (int row = 0; row < (int)self->workspaces_windows_rows.size(); row++)
-        {
-            for (int i = 0; i < (int)self->workspaces_windows_rows[row].size(); i++)
-            {
-                wf::region_t ws_region = self->workspaces_windows_rows[row][i]->get_bounding_box();
-                for (auto& ch : this->ws_instances_windows_rows[row][i])
-                {
-                    ch->compute_visibility(output, ws_region);
-                }
-            }
-        }
+        for (int row = 0; row < (int)ws_instance_managers_windows_rows.size(); row++)
+{
+    for (int i = 0; i < (int)ws_instance_managers_windows_rows[row].size(); i++)
+    {
+        const float scale = self->cube->output->handle->scale;
+        auto bbox = self->cube->output->get_layout_geometry();
+        framebuffers_windows_rows[row][i].allocate(wf::dimensions(bbox), scale);
+
+        wf::render_target_t fb_target{framebuffers_windows_rows[row][i]};
+        fb_target.geometry = bbox;
+        fb_target.scale = scale;
+
+        auto& instances = ws_instance_managers_windows_rows[row][i]->get_instances();
+        
+        wf::render_pass_params_t params;
+        params.instances = &instances;
+        params.damage = ws_damage_windows_rows[row][i];
+        params.reference_output = self->cube->output;
+        params.target = fb_target;
+        params.flags = wf::RPASS_CLEAR_BACKGROUND | wf::RPASS_EMIT_SIGNALS;
+
+        wf::render_pass_t::run(params);
+        ws_damage_windows_rows[row][i].clear();
+    }
+}
     }
 };
 
@@ -1814,10 +1743,6 @@ void render_cap_textures()
 }
     
 
-// The issue: Your render() function is calculating vertical_offset for cube rows,
-// but the calls to render_cap might not be using the right offsets
-
-// Looking at your render() function, you should be calling:
 
     void render(const wf::scene::render_instruction_t& data, 
                 std::vector<wf::auxilliary_buffer_t>& buffers, 
