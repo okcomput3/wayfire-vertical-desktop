@@ -1323,7 +1323,7 @@ void deactivate()
 
     render_node = nullptr;
     output->render->rem_effect(&pre_hook);
-    output->render->set_require_depth_buffer(false);
+  //  output->render->set_require_depth_buffer(false);
 
     input_grab->ungrab_input();
     output->deactivate_plugin(&grab_interface);
