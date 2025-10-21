@@ -1187,11 +1187,13 @@ void render_shader_background(const wf::render_target_t& target)
 
         wf::get_core().connect(&on_motion_event);
 
+ output->wset()->set_workspace({0, 0});
+
         render_node = std::make_shared<cube_render_node_t>(this);
         wf::scene::add_front(wf::get_core().scene(), render_node);
         output->render->add_effect(&pre_hook, wf::OUTPUT_EFFECT_PRE);
         output->render->set_require_depth_buffer(true);
-        output->wset()->set_workspace({0, 0});
+//        output->wset()->set_workspace({0, 0});
 
 
         wf::get_core().hide_cursor();
