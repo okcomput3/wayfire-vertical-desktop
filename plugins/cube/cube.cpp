@@ -281,7 +281,7 @@ void main() {
 
 class wayfire_cube : public wf::per_output_plugin_instance_t, public wf::pointer_interaction_t
 {
-      wf::animation::simple_animation_t popout_scale_animation{wf::create_option<int>(200)}; // 1 second
+      wf::animation::simple_animation_t popout_scale_animation{wf::create_option<int>(300)}; // 0.3 second
     class cube_render_node_t : public wf::scene::node_t
     {
 
@@ -1313,10 +1313,10 @@ void deactivate()
     }
 
     // Animate popout scale back to 1.0
-    popout_scale_animation.animate(1.0);
+  //  popout_scale_animation.animate(1.0);
     
     // Don't actually deactivate until animation finishes
-    animation.in_exit = true;
+   // animation.in_exit = true;
 
     wf::scene::remove_child(render_node);
     output->render->damage_whole();
@@ -1324,6 +1324,13 @@ void deactivate()
     render_node = nullptr;
     output->render->rem_effect(&pre_hook);
   //  output->render->set_require_depth_buffer(false);
+
+wf::gles::run_in_context([&]
+{
+    GL_CALL(glClear(GL_DEPTH_BUFFER_BIT));
+});
+
+
 
     input_grab->ungrab_input();
     output->deactivate_plugin(&grab_interface);
@@ -1502,7 +1509,7 @@ void reset_attribs()
          * */
         reset_attribs();
 
-        popout_scale_animation.animate(1.0);
+        popout_scale_animation.animate(1.01); //longer time to fix screen glitch
         animation.cube_animation.start();
 
         update_view_matrix();
