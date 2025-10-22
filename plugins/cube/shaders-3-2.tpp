@@ -141,7 +141,7 @@ void main() {
     guv = tesuv[2];
     EmitVertex();
 })";
-
+/*
 static const char *cube_fragment_3_2 =
 R"(#version 320 es
 precision highp float;
@@ -154,3 +154,50 @@ void main() {
     highp vec4 texColor = texture(smp, guv);
     outColor = vec4(texColor.rgb * colorFactor, texColor.a);
 })";    
+*/
+
+static const char *cube_fragment_3_2 =
+R"(#version 320 es
+precision highp float;
+precision highp sampler2D;
+in highp vec2 guv;
+in highp vec3 colorFactor;
+layout(location = 0) out highp vec4 outColor;
+uniform highp sampler2D smp;
+
+// Function to calculate rounded corner mask
+float roundedCornerMask(vec2 uv, float radius) {
+    vec2 centered_uv = uv - 0.5;
+    vec2 corner_dist = abs(centered_uv) - (0.5 - radius);
+    if (corner_dist.x <= 0.0 && corner_dist.y <= 0.0) {
+        return 1.0;
+    }
+    if (corner_dist.x > 0.0 && corner_dist.y > 0.0) {
+        float dist_to_corner = length(corner_dist);
+        return smoothstep(radius + 0.01, radius - 0.01, dist_to_corner);
+    }
+    return 1.0;
+}
+
+// Function to calculate edge anti-aliasing mask
+float edgeAntiAliasMask(vec2 uv) {
+    float min_edge_dist = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    float aa_width = 0.01;
+    return smoothstep(0.0, aa_width, min_edge_dist);
+}
+
+void main() {
+    highp vec4 texColor = texture(smp, guv);
+    
+    // Apply rounded corners
+    float corner_radius = 0.08;  // Adjust this value to control corner roundness
+    float corner_mask = roundedCornerMask(guv, corner_radius);
+    float edge_mask = edgeAntiAliasMask(guv);
+    float final_mask = min(corner_mask, edge_mask);
+    
+    // Apply lighting and masking
+    vec3 finalColor = texColor.rgb * colorFactor;
+    float finalAlpha = texColor.a * final_mask;
+    
+    outColor = vec4(finalColor, finalAlpha);
+})";
